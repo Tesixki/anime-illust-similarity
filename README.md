@@ -161,6 +161,16 @@ python app.py
 
 起動後、ブラウザで `http://127.0.0.1:7860` を開きます（`OPEN_BROWSER=1` を設定すると自動で開きます）。
 
+**NVIDIA GPU がある場合（推奨）**: `start.bat` は `nvidia-smi` を検出すると CUDA 版 torch を自動で入れます。
+手動セットアップの場合は `requirements.txt` の前に次を実行してください（Windows の PyPI 配布 torch は CPU 版のため）。
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+```
+
+CUDA が使えると torch 系モデル（PixAI / SigLIP 2 / DINOv2 / DreamSim / Depth）が GPU で動き、1 組あたり十数秒になります。
+ONNX 系（CCIP / WD14 / DWPose）は CPU のまま動きます。
+
 Python 3.10〜3.12 で動作確認しています。GPU は不要ですが、CPU では 1 組あたり 1〜2 分かかります
 （PixAI Tagger が大半なので、軽くしたい場合は `ENABLE_PIXAI=0`）。
 

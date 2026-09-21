@@ -29,17 +29,25 @@ if not exist "%PY%" (
 
 :deps
 
-if not exist "%VENV%\.deps_installed" (
-    echo [setup] Installing dependencies ^(first run only, this takes several minutes^)...
-    "%PY%" -m pip install --upgrade pip
-    "%PY%" -m pip install -r requirements.txt gradio
-    if errorlevel 1 (
-        echo [error] pip install failed. Check your network / proxy and retry.
-        pause
-        exit /b 1
-    )
-    echo ok> "%VENV%\.deps_installed"
+if exist "%VENV%\.deps_installed" goto :run
+echo [setup] Installing dependencies ^(first run only, this takes several minutes^)...
+"%PY%" -m pip install --upgrade pip
+rem NVIDIA GPU があれば CUDA 版 torch を先に入れる（PyPI の Windows 向け torch は CPU 版のため）
+where nvidia-smi >nul 2>nul
+if errorlevel 1 goto :deps_cpu
+echo [setup] NVIDIA GPU detected - installing CUDA build of torch ^(about 3GB^)...
+"%PY%" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+if errorlevel 1 echo [warn] CUDA torch install failed, falling back to the CPU build.
+:deps_cpu
+"%PY%" -m pip install -r requirements.txt gradio
+if errorlevel 1 (
+    echo [error] pip install failed. Check your network / proxy and retry.
+    pause
+    exit /b 1
 )
+echo ok> "%VENV%\.deps_installed"
+
+:run
 
 if "%ENABLE_PIXAI%"=="" set "ENABLE_PIXAI=1"
 if /i "%~1"=="--no-pixai" set "ENABLE_PIXAI=0"
