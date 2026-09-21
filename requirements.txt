@@ -1,0 +1,14 @@
+# Hugging Face Space (CPU) 用。すべての推論はCPUで動作する。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.4
+torchvision>=0.19
+
+Pillow>=10.0
+numpy
+
+open_clip_torch>=2.32   # SigLIP 2 (ViT-B-16-SigLIP2-256, WebLI)
+transformers>=4.45      # DINOv2 (facebook/dinov2-small)
+dreamsim>=0.2.1         # DreamSim ensemble (知覚的類似度)
+dghs-imgutils>=0.15     # CCIP + WD14 tagger v3
+onnxruntime>=1.16       # imgutils の ONNX 推論バックエンド
+huggingface_hub
