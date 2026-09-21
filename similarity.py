@@ -197,9 +197,15 @@ def _get_dreamsim():
         import torch
         from dreamsim import dreamsim
 
-        model, preprocess = dreamsim(
-            pretrained=True, device="cpu", cache_dir=DREAMSIM_CACHE
-        )
+        from unittest.mock import patch
+
+        # ZeroGPU では起動時に torch.cuda.is_available() が True に patch され、
+        # peft のアダプタ読み込みが CUDA を選んで失敗する（実 GPU は @spaces.GPU 内でのみ使用可）。
+        # ロード中だけ False に固定し、確実に CPU へ読み込む。
+        with patch.object(torch.cuda, "is_available", lambda: False):
+            model, preprocess = dreamsim(
+                pretrained=True, device="cpu", cache_dir=DREAMSIM_CACHE
+            )
         model.to(_DEVICE)
         return model, preprocess, torch
 
