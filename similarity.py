@@ -102,7 +102,13 @@ def set_device(device: str) -> str:
         device = "cpu"
     for key in ("siglip", "dino", "dreamsim", "pixai"):
         if key in _CACHE:
-            _CACHE[key][0].to(device)
+            model = _CACHE[key][0]
+            model.to(device)
+            # DreamSim の PerceptualModel / ViTExtractor は `device` 属性を持ち、
+            # forward 内で投影行列を self.device に移すため、属性も同期させる。
+            for m in model.modules():
+                if isinstance(getattr(m, "device", None), str):
+                    m.device = device
     _DEVICE = device
     return device
 

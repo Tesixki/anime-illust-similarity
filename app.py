@@ -9,7 +9,8 @@ from pathlib import Path
 try:  # ZeroGPU Space では @spaces.GPU が必須。CPU Space / ローカルでは no-op
     import spaces  # noqa: F401  (torch より先に import する必要がある)
 
-    _gpu = spaces.GPU(duration=120)
+    # 実測は GPU で 1 組 30 秒前後。予約時間が長いと匿名ユーザーの ZeroGPU quota で弾かれるため短めにする
+    _gpu = spaces.GPU(duration=60)
 except Exception:  # spaces 未インストール等
     def _gpu(fn):
         return fn
