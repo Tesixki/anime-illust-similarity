@@ -161,7 +161,8 @@ HOW_TO_READ = f"""
 - DreamSim `distance`: 知覚的距離。0 で完全一致
 - Depth `corr`: 正規化した深度マップ（64×64）のピアソン相関。1.0 で完全一致。左右反転は別構図扱い
 - DWPose `limb cos`: 両画像で検出できた関節ペア（四肢）の向きベクトルのコサイン平均。1.0 で完全一致。
-  人物が検出できない、または共通の関節ペアが 4 本未満なら「対象外」
+  人物が検出できない、または共通の関節ペアが 4 本未満なら「対象外」。
+  両画像で指の骨が片手 6 本以上取れた場合は、指の向きの一致（左右の手の平均）を重み 0.5 で体（重み 1.0）に加えます
 - CCIP `difference`: キャラ間の距離。モデル既定の閾値 0.178 未満なら同一キャラ判定（このスケールで約 54 点）。
   CCIP は「別キャラ」と「無関係画像」を区別しないため、0 点のアンカーだけ別キャラの 95 パーセンタイルを使用
 
@@ -199,7 +200,7 @@ with gr.Blocks(title="イラスト一致度スコア") as demo:
             vis_pose_b = gr.Image(label="ポーズ 画像B", interactive=False, height=300)
         gr.Markdown(
             "<small>Depth: 明るいほど手前（Depth Anything V2 の相対深度）。"
-            "ポーズ: 信頼度 0.5 以上の関節のみ描画（DWPose, OpenPose 18 点形式）。</small>"
+            "ポーズ: 信頼度が閾値以上の関節のみ描画（DWPose, OpenPose 形式。体 18 点 + 両手の指 21 点 × 2）。</small>"
         )
     with gr.Accordion("スコアの内訳", open=False):
         breakdown = gr.Dataframe(

@@ -61,7 +61,7 @@ CALIBRATION = {
     # 値は calibration/calibrate_composition.py の実測中央値（calibration_composition.json）。
     # ポーズは無関係画像がほぼ対象外になるため、0 点アンカーは別カットの 5 パーセンタイル。
     "depth": {"kind": "cosine", "anchors": (0.285, 0.451, 0.805, 0.999)},
-    "pose": {"kind": "cosine", "anchors": (-0.164, 0.806, 0.978, 1.000)},
+    "pose": {"kind": "cosine", "anchors": (-0.074, 0.734, 0.978, 0.999)},
 }
 
 
@@ -473,8 +473,25 @@ POSE_MODE = os.environ.get("POSE_MODE", "performance")  # rtmlib: lightweight / 
 POSE_KPT_THR = float(os.environ.get("POSE_KPT_THR", "2.8" if POSE_MODE == "performance" else "0.5"))
 POSE_MIN_LIMBS = 4
 POSE_TTA = os.environ.get("POSE_TTA", "1") != "0"  # 左右反転して 2 回推定し、座標を信頼度で加重平均
-# OpenPose 18 点の左右対応（反転 TTA 用）
-POSE_LR_SWAP = [(2, 5), (3, 6), (4, 7), (8, 11), (9, 12), (10, 13), (14, 15), (16, 17)]
+# 人物ボックスを複数スケールで切り出して推定を平均する（位置ノイズの低減）。"1.0" で無効
+POSE_BOX_SCALES = tuple(float(x) for x in os.environ.get("POSE_BOX_SCALES", "1.0,1.25").split(","))
+# 短辺がこれ未満の画像は推定前に拡大する（0 で無効）
+POSE_UPSCALE_MIN_SIDE = int(os.environ.get("POSE_UPSCALE_MIN_SIDE", "0"))
+# 手（指）: OpenPose 134 点形式の 92..112 が左手、113..133 が右手（各 root + 5 指 × 4 関節）
+POSE_HAND_THR = float(os.environ.get("POSE_HAND_THR", "2.5" if POSE_MODE == "performance" else "0.4"))
+POSE_HAND_MIN_LIMBS = 6      # 片手あたり、両画像で共通して取れた指の骨がこれ以上なら手を比較に含める
+POSE_HAND_WEIGHT = 0.5       # 総合 limb cos における手（左右まとめて）の重み。体は 1.0
+POSE_LHAND, POSE_RHAND = 92, 113
+POSE_HAND_LIMBS = []  # (i, j) 片手 20 本。root->指1->指2->指3->指4
+for _f in range(5):
+    _b = 1 + _f * 4
+    POSE_HAND_LIMBS += [(0, _b), (_b, _b + 1), (_b + 1, _b + 2), (_b + 2, _b + 3)]
+# 左右対応（反転 TTA 用）: 体 + 足 + 手
+POSE_LR_SWAP = (
+    [(2, 5), (3, 6), (4, 7), (8, 11), (9, 12), (10, 13), (14, 15), (16, 17)]
+    + [(18, 21), (19, 22), (20, 23)]
+    + [(POSE_LHAND + i, POSE_RHAND + i) for i in range(21)]
+)
 # OpenPose 18 点: 0鼻 1首 2右肩 3右肘 4右手首 5左肩 6左肘 7左手首 8右腰 9右膝 10右足首
 #                11左腰 12左膝 13左足首 14右目 15左目 16右耳 17左耳
 POSE_LIMBS = [
@@ -499,7 +516,7 @@ def _get_pose():
 
 
 def _pose_pick_person(kpts: np.ndarray, scores: np.ndarray) -> int:
-    """有効関節のバウンディングボックスが最大の人物のインデックスを返す。"""
+    """有効な体の関節のバウンディングボックスが最大の人物のインデックスを返す。"""
     best, best_area = 0, -1.0
     for i in range(kpts.shape[0]):
         v = kpts[i, :18][scores[i, :18] >= POSE_KPT_THR]
@@ -510,7 +527,7 @@ def _pose_pick_person(kpts: np.ndarray, scores: np.ndarray) -> int:
 
 
 def _pose_flip_back(kpts: np.ndarray, scores: np.ndarray, width: int):
-    """反転画像で推定した関節を元画像の座標系に戻し、左右のラベルを入れ替える。"""
+    """反転画像で推定した関節（134 点）を元画像の座標系に戻し、左右のラベルを入れ替える。"""
     kpts = kpts.copy()
     scores = scores.copy()
     kpts[:, 0] = width - 1 - kpts[:, 0]
@@ -521,11 +538,21 @@ def _pose_flip_back(kpts: np.ndarray, scores: np.ndarray, width: int):
 
 
 def pose_embed(img: Image.Image) -> dict:
+    """DWPose で OpenPose 134 点（体 18 / 足 6 / 顔 68 / 両手 42）を推定する。
+
+    精度対策: 人物ボックスの複数スケール切り出し + 左右反転 TTA を信頼度で加重平均、
+    人物検出に失敗したら画面全体を 1 人として推定、小さい画像は事前拡大（任意）。
+    """
     import cv2
     from rtmlib import draw_skeleton
 
     (wb,) = _get_pose()
-    bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    rgb = np.asarray(img.convert("RGB"))
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    up = 1.0
+    if POSE_UPSCALE_MIN_SIDE and min(bgr.shape[:2]) < POSE_UPSCALE_MIN_SIDE:
+        up = POSE_UPSCALE_MIN_SIDE / min(bgr.shape[:2])
+        bgr = cv2.resize(bgr, None, fx=up, fy=up, interpolation=cv2.INTER_LANCZOS4)
     h, w = bgr.shape[:2]
     bboxes = wb.det_model(bgr)
     if len(bboxes) == 0:  # 人物検出に失敗した場合は画面全体を 1 人として推定（バストアップ等の保険）
@@ -535,23 +562,62 @@ def pose_embed(img: Image.Image) -> dict:
     if kpts.shape[0] == 0:
         return out
     best = _pose_pick_person(kpts, scores)
-    kp = kpts[best, :18].astype(np.float32)
-    sc = scores[best, :18].astype(np.float32)
+    b0 = bboxes[best]
+    cx, cy = (b0[0] + b0[2]) / 2, (b0[1] + b0[3]) / 2
+    bw, bh = b0[2] - b0[0], b0[3] - b0[1]
 
-    if POSE_TTA:  # 左右反転 TTA: 同じ人物ボックスを反転して再推定し、信頼度で加重平均
-        fb = [[w - 1 - b[2], b[1], w - 1 - b[0], b[3]] for b in [bboxes[best]]]
-        kf, sf = wb.pose_model(np.ascontiguousarray(bgr[:, ::-1]), bboxes=fb)
-        if kf.shape[0]:
-            kf, sf = _pose_flip_back(kf[0, :18].astype(np.float32), sf[0, :18].astype(np.float32), w)
-            wsum = sc + sf + 1e-6
-            kp = (kp * sc[:, None] + kf * sf[:, None]) / wsum[:, None]
-            sc = (sc + sf) / 2.0
+    flipped = np.ascontiguousarray(bgr[:, ::-1]) if POSE_TTA else None
+    acc_kp = np.zeros((134, 2), dtype=np.float64)
+    acc_w = np.zeros(134, dtype=np.float64)
+    sc_list = []
+    for s in POSE_BOX_SCALES:
+        box = [cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2]
+        kp, sc = wb.pose_model(bgr, bboxes=[box])
+        kp, sc = kp[0].astype(np.float64), sc[0].astype(np.float64)
+        acc_kp += kp * sc[:, None]
+        acc_w += sc
+        sc_list.append(sc)
+        if flipped is not None:
+            fb = [w - 1 - box[2], box[1], w - 1 - box[0], box[3]]
+            kf, sf = wb.pose_model(flipped, bboxes=[fb])
+            kf, sf = _pose_flip_back(kf[0].astype(np.float64), sf[0].astype(np.float64), w)
+            acc_kp += kf * sf[:, None]
+            acc_w += sf
+            sc_list.append(sf)
+    kp = (acc_kp / (acc_w[:, None] + 1e-6)).astype(np.float32)
+    sc = np.mean(sc_list, axis=0).astype(np.float32)
 
+    # 可視化（拡大した座標系のまま描き、最後に元サイズへ）。体は POSE_KPT_THR、手は POSE_HAND_THR で描画
+    vis = draw_skeleton(bgr.copy(), kp[None, :18], sc[None, :18], openpose_skeleton=True, kpt_thr=POSE_KPT_THR)
+    hand_kp = np.concatenate([kp[None, POSE_LHAND:POSE_LHAND + 21], kp[None, POSE_RHAND:POSE_RHAND + 21]], axis=0)
+    hand_sc = np.concatenate([sc[None, POSE_LHAND:POSE_LHAND + 21], sc[None, POSE_RHAND:POSE_RHAND + 21]], axis=0)
+    vis = draw_skeleton(vis, hand_kp, hand_sc, openpose_skeleton=False, kpt_thr=POSE_HAND_THR, radius=2, line_width=2)
+    if up != 1.0:
+        vis = cv2.resize(vis, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_AREA)
+        kp = kp / up
     out["kpts"] = kp
     out["scores"] = sc
-    vis = draw_skeleton(bgr.copy(), kp[None], sc[None], openpose_skeleton=True, kpt_thr=POSE_KPT_THR)
     out["vis"] = Image.fromarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
     return out
+
+
+def _limb_cosines(p1: dict, p2: dict, limbs, offset: int, thr: float):
+    """関節ペア（骨）の向きベクトルのコサインと重み（両画像の最小信頼度）を返す。"""
+    cos_list, weights, idx = [], [], []
+    for n, (i, j) in enumerate(limbs):
+        a, b = i + offset, j + offset
+        conf = min(p1["scores"][a], p1["scores"][b], p2["scores"][a], p2["scores"][b])
+        if conf < thr:
+            continue
+        v1 = p1["kpts"][b] - p1["kpts"][a]
+        v2 = p2["kpts"][b] - p2["kpts"][a]
+        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+        if n1 < 1e-3 or n2 < 1e-3:
+            continue
+        cos_list.append(float(v1 @ v2 / (n1 * n2)))
+        weights.append(float(conf))
+        idx.append(n)
+    return cos_list, weights, idx
 
 
 def pose_metric(p1: dict, p2: dict) -> dict:
@@ -560,29 +626,39 @@ def pose_metric(p1: dict, p2: dict) -> dict:
         who = "両方" if p1["kpts"] is None and p2["kpts"] is None else ("画像A" if p1["kpts"] is None else "画像B")
         return {**base, "skipped": f"{who}で人物（ポーズ）を検出できませんでした", "raw": None}
 
-    cos_list, names, weights = [], [], []
-    for (i, j), name in zip(POSE_LIMBS, POSE_LIMB_NAMES):
-        conf = min(p1["scores"][i], p1["scores"][j], p2["scores"][i], p2["scores"][j])
-        if conf < POSE_KPT_THR:
-            continue
-        v1 = p1["kpts"][j] - p1["kpts"][i]
-        v2 = p2["kpts"][j] - p2["kpts"][i]
-        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
-        if n1 < 1e-3 or n2 < 1e-3:
-            continue
-        cos_list.append(float(v1 @ v2 / (n1 * n2)))
-        names.append(name)
-        weights.append(float(conf))  # 信頼度の低い関節ペアほど寄与を小さくする
-    if len(cos_list) < POSE_MIN_LIMBS:
+    body_cos, body_w, body_idx = _limb_cosines(p1, p2, POSE_LIMBS, 0, POSE_KPT_THR)
+    if len(body_cos) < POSE_MIN_LIMBS:
         return {
             **base,
-            "skipped": f"両画像で共通して検出できた関節ペアが {len(cos_list)} 本のみ（{POSE_MIN_LIMBS} 本以上必要）",
+            "skipped": f"両画像で共通して検出できた関節ペアが {len(body_cos)} 本のみ（{POSE_MIN_LIMBS} 本以上必要）",
             "raw": None,
         }
-    raw = float(np.average(cos_list, weights=weights))
+    body_raw = float(np.average(body_cos, weights=body_w))
+
+    # 手（指）: 片手ごとに共通の骨が POSE_HAND_MIN_LIMBS 本以上あれば比較に含める
+    hands = {}
+    for name, off in (("左手", POSE_LHAND), ("右手", POSE_RHAND)):
+        hc, hw, _ = _limb_cosines(p1, p2, POSE_HAND_LIMBS, off, POSE_HAND_THR)
+        if len(hc) >= POSE_HAND_MIN_LIMBS:
+            hands[name] = (float(np.average(hc, weights=hw)), len(hc))
+    if hands:
+        hand_raw = float(np.mean([v[0] for v in hands.values()]))
+        raw = (body_raw * 1.0 + hand_raw * POSE_HAND_WEIGHT) / (1.0 + POSE_HAND_WEIGHT)
+    else:
+        hand_raw = None
+        raw = body_raw
+
     c = CALIBRATION["pose"]
     score = _piecewise_score(raw, c["anchors"], c["kind"])
-    worst = sorted(zip(cos_list, names))[:3]
+    worst = sorted(zip(body_cos, [POSE_LIMB_NAMES[i] for i in body_idx]))[:3]
+    detail = f"limb cos={raw:.3f}（1.0で完全一致, 体の関節ペア {len(body_cos)} 本"
+    if hands:
+        detail += "、" + " / ".join(f"{k}の指 {v[1]} 本 (cos {v[0]:.2f})" for k, v in hands.items())
+    else:
+        detail += "、指は両画像で共通して取れず"
+    detail += "）"
+    if worst and worst[0][0] < 0.7:
+        detail += " / 差が大きい部位: " + ", ".join(f"{n}({cv:.2f})" for cv, n in worst)
     note = None
     if p1["n_people"] > 1 or p2["n_people"] > 1:
         note = f"複数人物を検出（A: {p1['n_people']} / B: {p2['n_people']}）。最も大きい人物同士で比較しています"
@@ -591,12 +667,12 @@ def pose_metric(p1: dict, p2: dict) -> dict:
         "raw": raw,
         "score": score,
         "interp": _interp_by_score(score, "ポーズ"),
-        "detail": (
-            f"limb cos={raw:.3f}（1.0で完全一致, 比較した関節ペア {len(cos_list)} 本）"
-            + (" / 差が大きい部位: " + ", ".join(f"{n}({c:.2f})" for c, n in worst) if worst and worst[0][0] < 0.7 else "")
-        ),
+        "detail": detail,
         "note": note,
-        "n_limbs": len(cos_list),
+        "n_limbs": len(body_cos),
+        "body_raw": body_raw,
+        "hand_raw": hand_raw,
+        "hands": {k: v[1] for k, v in hands.items()},
     }
 
 
