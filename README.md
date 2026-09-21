@@ -19,8 +19,13 @@ models:
 
 # イラスト一致度スコア
 
-2枚のイラスト画像を入力すると、一致度を **0〜100 のスコア** で返す Hugging Face Space です。
-主にアニメ・二次元イラストを対象とし、ZeroGPU（`@spaces.GPU`）と CPU の両方で動作します。
+[![Open in Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-md.svg)](https://huggingface.co/spaces/rurukikiki/anime-illust-similarity)
+[![GitHub](https://img.shields.io/badge/GitHub-Tesixki%2Fanime--illust--similarity-181717?logo=github)](https://github.com/Tesixki/anime-illust-similarity)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](#license)
+
+2枚のイラスト画像を入力すると、一致度を **0〜100 のスコア** で返す Web アプリです。
+主にアニメ・二次元イラストを対象とし、Hugging Face Space（ZeroGPU）でもローカル PC（CPU のみ）でも同じコードで動作します。
+Windows なら `start.bat` をダブルクリックするだけで起動できます（[ローカルでの起動](#ローカルでの起動)）。
 
 ## 計算するメトリクス
 
@@ -138,6 +143,12 @@ Hugging Face Space（[rurukikiki/anime-illust-similarity](https://huggingface.co
 サンプル画像は Git LFS 管理なので、clone 前に [git-lfs](https://git-lfs.com/) を入れておいてください
 （未導入でも動きますが、サンプルが表示されません）。
 
+**Windows（かんたん）**: clone したフォルダの `start.bat` をダブルクリック。初回は `.venv` の作成・依存関係のインストール・
+モデルのダウンロードに時間がかかります（2 回目以降は 30 秒ほどで起動）。準備ができるとブラウザが自動で開きます。
+PixAI Tagger を外して軽くしたい場合はコマンドプロンプトから `start.bat --no-pixai` で起動してください。
+
+**手動（Windows / macOS / Linux）**:
+
 ```bash
 git lfs install
 git clone https://github.com/Tesixki/anime-illust-similarity.git
@@ -147,6 +158,8 @@ python -m venv .venv
 pip install -r requirements.txt gradio
 python app.py
 ```
+
+起動後、ブラウザで `http://127.0.0.1:7860` を開きます（`OPEN_BROWSER=1` を設定すると自動で開きます）。
 
 Python 3.10〜3.12 で動作確認しています。GPU は不要ですが、CPU では 1 組あたり 1〜2 分かかります
 （PixAI Tagger が大半なので、軽くしたい場合は `ENABLE_PIXAI=0`）。

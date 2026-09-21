@@ -1,0 +1,52 @@
+@echo off
+setlocal
+rem ------------------------------------------------------------------
+rem  Illust similarity - local launcher (Windows)
+rem    start.bat             : run with all metrics
+rem    start.bat --no-pixai  : skip PixAI Tagger (much faster on CPU)
+rem  First run creates .venv, installs dependencies and downloads
+rem  models (~4.5GB into %USERPROFILE%\.cache). Later runs start in ~30s.
+rem ------------------------------------------------------------------
+cd /d "%~dp0"
+
+set "VENV=.venv"
+set "PY=%VENV%\Scripts\python.exe"
+
+if exist "%PY%" goto :deps
+echo [setup] Creating virtual environment...
+where py >nul 2>nul
+if errorlevel 1 goto :venv_python
+py -3 -m venv "%VENV%"
+goto :venv_check
+:venv_python
+python -m venv "%VENV%"
+:venv_check
+if not exist "%PY%" (
+    echo [error] Could not create .venv. Install Python 3.10 - 3.12 from https://www.python.org/ and retry.
+    pause
+    exit /b 1
+)
+
+:deps
+
+if not exist "%VENV%\.deps_installed" (
+    echo [setup] Installing dependencies ^(first run only, this takes several minutes^)...
+    "%PY%" -m pip install --upgrade pip
+    "%PY%" -m pip install -r requirements.txt gradio
+    if errorlevel 1 (
+        echo [error] pip install failed. Check your network / proxy and retry.
+        pause
+        exit /b 1
+    )
+    echo ok> "%VENV%\.deps_installed"
+)
+
+if "%ENABLE_PIXAI%"=="" set "ENABLE_PIXAI=1"
+if /i "%~1"=="--no-pixai" set "ENABLE_PIXAI=0"
+if "%OPEN_BROWSER%"=="" set "OPEN_BROWSER=1"
+set "HF_HUB_DISABLE_SYMLINKS_WARNING=1"
+
+echo [run] ENABLE_PIXAI=%ENABLE_PIXAI%  ^(use "start.bat --no-pixai" to skip the heavy PixAI Tagger^)
+echo [run] Starting app. The browser opens automatically when ready. Press Ctrl+C to stop.
+"%PY%" app.py
+pause

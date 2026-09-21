@@ -4,6 +4,7 @@
     python app.py
 """
 
+import os
 from pathlib import Path
 
 try:  # ZeroGPU Space では @spaces.GPU が必須。CPU Space / ローカルでは no-op
@@ -228,4 +229,7 @@ if __name__ == "__main__":
     print("モデルを事前ロード中...", flush=True)
     similarity.preload(progress=lambda name: print(f"  loading {name}", flush=True))
     print("ロード完了", flush=True)
-    demo.queue(default_concurrency_limit=1).launch()
+    # OPEN_BROWSER=1（start.bat が設定）のときだけブラウザを自動で開く。Space では未設定
+    demo.queue(default_concurrency_limit=1).launch(
+        inbrowser=os.environ.get("OPEN_BROWSER") == "1"
+    )
