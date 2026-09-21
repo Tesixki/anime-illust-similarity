@@ -1,13 +1,14 @@
 """イラスト類似度メトリクス計算モジュール
 
-2枚のイラストについて、以下5系統の類似度を計算し 0〜100 のスコアに変換する。
-すべてCPUで動作し、モデルは初回呼び出し時（Spaceでは起動時）に自動でダウンロードされる。
+2枚のイラストについて、以下6系統の類似度を計算し 0〜100 のスコアに変換する。
+CPU / ZeroGPU の両方で動作し、モデルは初回呼び出し時（Spaceでは起動時）に自動でダウンロードされる。
 
-- SigLIP 2 : 画像内容のセマンティック類似度（OpenCLIP ViT-B-16-SigLIP2-256 / WebLI）
-- DINOv2   : 自己教師あり視覚特徴の類似度（facebook/dinov2-small, CLS埋め込み）
-- DreamSim : 知覚的類似度（CLIP+DINO+OpenCLIP アンサンブルを人間の判断で微調整）
 - CCIP     : アニメキャラクターの同一性（deepghs/imgutils, ONNX）
 - WD14     : イラストタグ埋め込みの一致度（WD SwinV2 tagger v3, ONNX）
+- PixAI    : 大規模アニメタガー PixAI Tagger v1.0 の内部埋め込みの一致度（SAM3系 ViTDet, 1008px）
+- DreamSim : 知覚的類似度（CLIP+DINO+OpenCLIP アンサンブルを人間の判断で微調整）
+- SigLIP 2 : 画像内容のセマンティック類似度（OpenCLIP ViT-B-16-SigLIP2-256 / WebLI）
+- DINOv2   : 自己教師あり視覚特徴の類似度（facebook/dinov2-small, CLS埋め込み）
 
 スコア化（生値 -> 0〜100）は `calibration/calibrate.py` で実画像ペアを
 4カテゴリ（近似複製 / 同一キャラ / 別キャラ / 無関係）に分けて実測した分布に
@@ -52,6 +53,7 @@ CALIBRATION = {
     "dreamsim": {"kind": "distance", "anchors": (0.758, 0.532, 0.314, 0.023)},
     "ccip": {"kind": "distance", "anchors": (0.461, 0.327, 0.074, 0.004)},
     "wd14": {"kind": "cosine", "anchors": (0.451, 0.530, 0.748, 0.991)},
+    "pixai": {"kind": "cosine", "anchors": (0.282, 0.508, 0.742, 0.978)},
 }
 
 
@@ -98,7 +100,7 @@ def set_device(device: str) -> str:
 
     if device.startswith("cuda") and not torch.cuda.is_available():
         device = "cpu"
-    for key in ("siglip", "dino", "dreamsim"):
+    for key in ("siglip", "dino", "dreamsim", "pixai"):
         if key in _CACHE:
             _CACHE[key][0].to(device)
     _DEVICE = device
@@ -306,6 +308,76 @@ def wd14_metric(w1: dict, w2: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# PixAI Tagger v1.0（pixai-labs/pixai-tagger-v1.0, SAM3 系 ViTDet 486M, 1008px）
+#   分類ヘッド直前の attention-pool 出力（1024次元）を埋め込みとして使い、
+#   同じ forward からタグ確率（30,877 タグ / 6 カテゴリ）も取る。
+#   非常に重いため CPU では 1 枚数十秒かかる。ENABLE_PIXAI=0 で無効化できる。
+# ---------------------------------------------------------------------------
+
+PIXAI_MODEL = os.environ.get("PIXAI_MODEL", "pixai-labs/pixai-tagger-v1.0")
+ENABLE_PIXAI = os.environ.get("ENABLE_PIXAI", "1") != "0"
+PIXAI_TAG_CATEGORIES = ("general", "character", "copyright", "style")
+
+
+def _get_pixai():
+    def build():
+        import torch
+        from transformers import AutoImageProcessor, AutoModel
+
+        proc = AutoImageProcessor.from_pretrained(PIXAI_MODEL, trust_remote_code=True)
+        model = AutoModel.from_pretrained(PIXAI_MODEL, trust_remote_code=True)
+        model.eval().to(_DEVICE)
+        cfg = model.config
+        thr = cfg.category_best_threshold or {}
+        # カテゴリごとの (name, start, end, threshold)
+        spans, st = [], 0
+        for cat, n in cfg.tags_split:
+            spans.append((cat, st, st + n, float(thr.get(cat, 0.2))))
+            st += n
+        return model, proc, torch, {"tags": list(cfg.tags), "spans": spans}
+
+    return _cached("pixai", build)
+
+
+def pixai_embed(img: Image.Image) -> dict:
+    model, proc, torch, meta = _get_pixai()
+    with torch.no_grad():
+        px = proc(img, return_tensors="pt")["pixel_values"].to(_DEVICE, model.dtype)
+        feats = model.forward_feature(px)[-1]  # [1, C, h, w]
+        tokens = feats.view(feats.shape[0], feats.shape[1], -1).permute(0, 2, 1)
+        pooled = model.head_pool(tokens)  # [1, embed_dim]
+        probs = torch.sigmoid(model.head(pooled))[0].float().cpu().numpy()
+    out = {"emb": pooled[0].float().cpu().numpy()}
+    tags = meta["tags"]
+    for cat, st, en, thr in meta["spans"]:
+        if cat not in PIXAI_TAG_CATEGORIES:
+            continue
+        idx = np.nonzero(probs[st:en] > thr)[0]
+        out[cat] = {tags[st + i]: float(probs[st + i]) for i in idx}
+    return out
+
+
+def pixai_metric(w1: dict, w2: dict) -> dict:
+    cos = _cosine(w1["emb"], w2["emb"])
+    c = CALIBRATION["pixai"]
+    score = _piecewise_score(cos, c["anchors"], c["kind"])
+    tags1 = set(w1["general"]) | set(w1["character"])
+    tags2 = set(w2["general"]) | set(w2["character"])
+    shared = sorted(tags1 & tags2, key=lambda t: -(w1["general"].get(t, 0) + w2["general"].get(t, 0)))
+    return {
+        "raw": cos,
+        "score": score,
+        "interp": _interp_by_score(score, "タグ構成"),
+        "detail": f"cosine={cos:.3f}（1.0で完全一致）",
+        "shared_tags": shared[:15],
+        "char_tags_a": sorted(w1["character"]),
+        "char_tags_b": sorted(w2["character"]),
+        "style_tags_a": sorted(w1.get("style", {})),
+        "style_tags_b": sorted(w2.get("style", {})),
+    }
+
+
 def _interp_by_score(score: float, subject: str) -> str:
     if score >= 85:
         return f"{subject}がほぼ同じ"
@@ -335,6 +407,12 @@ METRICS = {
         "embed": wd14_embed,
         "fn": wd14_metric,
     },
+    "pixai": {
+        "label": "タグ類似度 (PixAI Tagger v1.0)",
+        "desc": "30,877タグの大規模アニメタガー（SAM3系 ViTDet, 1008px）の内部埋め込みの一致度。",
+        "embed": pixai_embed,
+        "fn": pixai_metric,
+    },
     "dreamsim": {
         "label": "知覚的類似度 (DreamSim)",
         "desc": "人間の類似度判断に近い画像間距離。色合い・質感・スタイル向け。",
@@ -356,16 +434,23 @@ METRICS = {
 }
 
 # 総合スコアの重み。calibration の AUC（同一キャラ vs 別キャラ の識別力）に基づく:
-#   CCIP 0.999 / SigLIP2 0.949 / WD14 0.944 / DreamSim 0.941 / DINOv2 0.678
-# 最も識別力の高い CCIP を厚めにし、同程度の 3 つは均等、
+#   CCIP 0.999 / PixAI 0.960 / SigLIP2 0.949 / WD14 0.944 / DreamSim 0.941 / DINOv2 0.678
+# 最も識別力の高い CCIP を厚めにし、次点の PixAI をやや厚め、同程度の 3 つは均等、
 # キャラ識別に弱い DINOv2（構図・形状向け）は補助として軽くしている。
+# ENABLE_PIXAI=0 のときは pixai を除いて残りの重みで再正規化される（total_score 参照）。
 WEIGHTS = {
-    "ccip": 0.30,
-    "wd14": 0.20,
-    "siglip2": 0.20,
-    "dreamsim": 0.20,
+    "ccip": 0.25,
+    "pixai": 0.20,
+    "wd14": 0.15,
+    "siglip2": 0.15,
+    "dreamsim": 0.15,
     "dinov2": 0.10,
 }
+
+
+if not ENABLE_PIXAI:
+    METRICS.pop("pixai", None)
+    WEIGHTS.pop("pixai", None)
 
 
 def total_score(results: dict):
@@ -416,22 +501,43 @@ def make_comment(results: dict) -> str:
     lines = [f"総合評価: {band_label(total)}"]
     if "skipped" in results.get("ccip", {}):
         lines.append(f"CCIP（キャラ判定）は対象外のため総合スコアから除外: {results['ccip']['skipped']}")
+
+    # タグ系（PixAI / WD14）の平均スコア。CCIP の判定との整合チェックに使う
+    tag_scores = [results[k]["score"] for k in ("pixai", "wd14") if ok(k)]
+    tag_avg = sum(tag_scores) / len(tag_scores) if tag_scores else None
+
     if ok("ccip"):
         ccip = results["ccip"]
-        others = [results[k]["score"] for k in ("siglip2", "dreamsim", "wd14") if ok(k)]
+        others = [results[k]["score"] for k in ("siglip2", "dreamsim", "wd14", "pixai") if ok(k)]
         if ccip.get("same_character") and ccip["score"] >= 60:
-            lines.append("同一キャラクターの可能性が高いです（CCIP基準）")
+            if tag_avg is not None and tag_avg < 40:
+                lines.append(
+                    "CCIPは同一キャラ判定ですが、タグ系（PixAI / WD14）は別キャラを示唆しています"
+                    "（髪色・獣耳など属性が似た別キャラの可能性）"
+                )
+            else:
+                lines.append("同一キャラクターの可能性が高いです（CCIP基準）")
         elif ccip.get("same_character") is False:
             if others and max(others) >= 60:
                 lines.append("画風・構図は近いですが、キャラクターは別人の可能性があります")
             else:
                 lines.append("キャラクターも内容も異なる画像と見られます")
-    if ok("wd14"):
-        common = set(results["wd14"].get("char_tags_a") or []) & set(
-            results["wd14"].get("char_tags_b") or []
-        )
-        if common:
-            lines.append(f"共通キャラタグ検出: {', '.join(sorted(common))}")
+
+    # キャラタグ（PixAI 優先、無ければ WD14）
+    common, ta, tb = set(), set(), set()
+    for k in ("pixai", "wd14"):
+        if ok(k):
+            a = set(results[k].get("char_tags_a") or [])
+            b = set(results[k].get("char_tags_b") or [])
+            common |= a & b
+            ta |= a
+            tb |= b
+    if common:
+        lines.append(f"共通キャラタグ検出: {', '.join(sorted(common))}")
+    elif ta or tb:
+        fa = ", ".join(sorted(ta)[:3]) or "(なし)"
+        fb = ", ".join(sorted(tb)[:3]) or "(なし)"
+        lines.append(f"検出キャラタグ: 画像A = {fa} / 画像B = {fb}")
     return "\n".join(lines)
 
 
@@ -442,7 +548,7 @@ def preload(progress=None) -> None:
         ("DINOv2", _get_dino),
         ("DreamSim", _get_dreamsim),
         ("CCIP", _ccip_threshold),
-    ]
+    ] + ([("PixAI Tagger", _get_pixai)] if "pixai" in METRICS else [])
     for name, fn in loaders:
         if progress:
             progress(name)

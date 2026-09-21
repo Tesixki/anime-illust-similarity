@@ -21,6 +21,12 @@ import similarity
 
 SAMPLES_DIR = Path(__file__).parent / "samples"
 EXAMPLES = [
+    # ご注文はうさぎですか？ の保登心愛 vs 保登モカ（姉妹。衣装・構図がほぼ同じ別キャラの例）
+    [str(SAMPLES_DIR / "hoto-cocoa.png"), str(SAMPLES_DIR / "hoto-mocha.png")],
+    # ブルーアーカイブのシロコ vs ホロライブの白上フブキ（別キャラだが銀髪・獣耳など属性が近い例）
+    [str(SAMPLES_DIR / "shiroko.png"), str(SAMPLES_DIR / "fubuki.png")],
+    # 天下一品ロゴ vs 進入禁止標識（似ていると言われる有名な組み合わせ。非アニメ画像の例）
+    [str(SAMPLES_DIR / "tenkaippin_01.jpg"), str(SAMPLES_DIR / "shinnyu_kinshi_02.jpg")],
     [str(SAMPLES_DIR / "char_a_1.png"), str(SAMPLES_DIR / "char_a_2.png")],
     [str(SAMPLES_DIR / "char_a_1.png"), str(SAMPLES_DIR / "char_b_1.png")],
     [str(SAMPLES_DIR / "char_a_1.png"), str(SAMPLES_DIR / "landscape.png")],
@@ -99,6 +105,11 @@ def run(img_a, img_b, progress=gr.Progress()):
     return [summary, rows, note, *cards]
 
 
+WEIGHT_TEXT = " / ".join(
+    f"{similarity.METRICS[k]['label'].split(' (')[-1].rstrip(')')} {w}"
+    for k, w in similarity.WEIGHTS.items()
+)
+
 CALIB_TABLE = "\n".join(
     f"| {k} | {c['kind']} | " + " | ".join(f"{v:.3f}" for v in c["anchors"]) + " |"
     for k, c in similarity.CALIBRATION.items()
@@ -107,9 +118,7 @@ CALIB_TABLE = "\n".join(
 HOW_TO_READ = f"""
 ### スコアの見方
 
-総合スコアは各メトリクスの **重み付き平均** です（重み: CCIP {similarity.WEIGHTS['ccip']} /
-WD14 {similarity.WEIGHTS['wd14']} / DreamSim {similarity.WEIGHTS['dreamsim']} /
-SigLIP 2 {similarity.WEIGHTS['siglip2']} / DINOv2 {similarity.WEIGHTS['dinov2']}）。
+総合スコアは各メトリクスの **重み付き平均** です（重み: {WEIGHT_TEXT}）。
 
 | スコア | 目安 |
 |---|---|
@@ -128,7 +137,7 @@ SigLIP 2 {similarity.WEIGHTS['siglip2']} / DINOv2 {similarity.WEIGHTS['dinov2']}
 {CALIB_TABLE}
 
 **生値の意味**
-- SigLIP 2 / DINOv2 / WD14 `cosine`: 埋め込みのコサイン類似度。1.0 で完全一致
+- SigLIP 2 / DINOv2 / WD14 / PixAI `cosine`: 埋め込みのコサイン類似度。1.0 で完全一致
 - DreamSim `distance`: 知覚的距離。0 で完全一致
 - CCIP `difference`: キャラ間の距離。モデル既定の閾値 0.178 未満なら同一キャラ判定（このスケールで約 54 点）。
   CCIP は「別キャラ」と「無関係画像」を区別しないため、0 点のアンカーだけ別キャラの 95 パーセンタイルを使用
@@ -137,15 +146,15 @@ SigLIP 2 {similarity.WEIGHTS['siglip2']} / DINOv2 {similarity.WEIGHTS['dinov2']}
 CCIP は「対象外」として総合スコアから除外し、残りの重みで正規化します。
 複数キャラが検出された場合はスコアを出しつつ注意書きを表示します。
 
-注意: CCIP / WD14 は「単一キャラのアニメイラスト」前提のモデルで、キャリブレーションもアニメ画像で行っています。
+注意: CCIP / WD14 / PixAI はアニメイラスト前提のモデルで、キャリブレーションもアニメ画像で行っています。
 実写などでは目盛りがずれます。
 """
 
 with gr.Blocks(title="イラスト一致度スコア") as demo:
     gr.Markdown(
         "# 🎨 イラスト一致度スコア\n"
-        "2枚のイラストを入力すると、**キャラクター・タグ・知覚・意味・視覚特徴** の"
-        "5観点から一致度を 0〜100 でスコア化します（CPU動作、1組あたり数十秒）。"
+        "2枚のイラストを入力すると、**キャラクター・タグ（2種）・知覚・意味・視覚特徴** の"
+        f"{len(similarity.METRICS)}観点から一致度を 0〜100 でスコア化します。"
     )
     with gr.Row():
         img_a = gr.Image(type="pil", label="画像A", height=360)
@@ -153,8 +162,12 @@ with gr.Blocks(title="イラスト一致度スコア") as demo:
     btn = gr.Button("類似度を計算", variant="primary")
 
     summary = gr.Markdown()
-    with gr.Row():
-        cards = [gr.Markdown() for _ in similarity.METRICS]
+    cards = []
+    keys = list(similarity.METRICS)
+    for i in range(0, len(keys), 3):  # 3 列ずつ並べる
+        with gr.Row():
+            for _ in keys[i : i + 3]:
+                cards.append(gr.Markdown())
     with gr.Accordion("スコアの内訳", open=False):
         breakdown = gr.Dataframe(
             headers=BREAKDOWN_HEADERS, datatype=["str", "str", "number", "str"],
@@ -168,7 +181,7 @@ with gr.Blocks(title="イラスト一致度スコア") as demo:
         gr.Examples(
             examples=EXAMPLES,
             inputs=[img_a, img_b],
-            label="サンプル（プロシージャル生成の簡易画像。実際のイラストでお試しください）",
+            label="サンプル（ココア vs モカ / シロコ vs フブキ / 天下一品ロゴ vs 進入禁止標識 / プロシージャル生成の簡易画像）",
             cache_examples=False,
         )
 

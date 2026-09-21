@@ -7,7 +7,8 @@ Pillow>=10.0
 numpy
 
 open_clip_torch>=2.32   # SigLIP 2 (ViT-B-16-SigLIP2-256, WebLI)
-transformers>=4.45      # DINOv2 (facebook/dinov2-small)
+transformers>=4.57      # DINOv2 (facebook/dinov2-small) / PixAI Tagger v1.0 (custom code)
+timm                    # PixAI Tagger v1.0 の依存
 dreamsim>=0.2.1         # DreamSim ensemble (知覚的類似度)
 dghs-imgutils>=0.15     # CCIP + WD14 tagger v3
 onnxruntime>=1.16       # imgutils の ONNX 推論バックエンド

@@ -10,6 +10,7 @@ app_file: app.py
 pinned: false
 license: mit
 models:
+  - pixai-labs/pixai-tagger-v1.0
   - timm/ViT-B-16-SigLIP2-256
   - facebook/dinov2-small
   - deepghs/ccip
@@ -19,20 +20,25 @@ models:
 # イラスト一致度スコア
 
 2枚のイラスト画像を入力すると、一致度を **0〜100 のスコア** で返す Hugging Face Space です。
-主にアニメ・二次元イラストを対象とし、CPU のみで動作します（1組あたり数十秒）。
+主にアニメ・二次元イラストを対象とし、ZeroGPU（`@spaces.GPU`）と CPU の両方で動作します。
 
 ## 計算するメトリクス
 
 | メトリクス | 観点 | 使用モデル | 生値 |
 |---|---|---|---|
 | キャラクター類似度 (CCIP) | 描かれているキャラが同一か | [deepghs/imgutils](https://github.com/deepghs/imgutils) CCIP caformer（ONNX） | difference（小さいほど同一） |
-| タグ類似度 (WD14 tagger v3) | キャラ名・属性・服装タグの一致 | WD SwinV2 tagger v3 の内部埋め込み | cosine |
+| タグ類似度 (WD14 tagger v3) | キャラ名・属性・服装タグの一致 | WD SwinV2 tagger v3 の内部埋め込み（ONNX） | cosine |
+| タグ類似度 (PixAI Tagger v1.0) | 30,877 タグの大規模タガーによるタグ・キャラ・画風の一致 | [pixai-labs/pixai-tagger-v1.0](https://huggingface.co/pixai-labs/pixai-tagger-v1.0)（SAM3 系 ViTDet 486M, 1008px）の attention-pool 埋め込み | cosine |
 | 知覚的類似度 (DreamSim) | 人間の知覚に近い画像間距離 | DreamSim ensemble（CLIP+DINO+OpenCLIP, LoRA微調整） | distance = 1 − cosine |
 | セマンティック類似度 (SigLIP 2) | 画像全体の意味・内容の近さ | OpenCLIP ViT-B-16-SigLIP2-256 (WebLI) | cosine |
 | 視覚特徴類似度 (DINOv2) | 構図・形状・オブジェクトの近さ | facebook/dinov2-small（CLS 埋め込み） | cosine |
 
+PixAI Tagger は分類ヘッド直前の 1024 次元ベクトルを埋め込みに使い、同じ forward で得たタグ確率から
+共通タグ・キャラタグも表示します（閾値はモデルカード推奨の general 0.17 / character 0.27 / style 0.15 / copyright 0.24）。
+非常に重いモデルのため、CPU では 1 枚あたり数十秒かかります（`ENABLE_PIXAI=0` で無効化可能）。
+
 総合スコアは各メトリクスの重み付き平均
-（CCIP 0.30 / WD14 0.20 / SigLIP 2 0.20 / DreamSim 0.20 / DINOv2 0.10）です。
+（CCIP 0.25 / PixAI 0.20 / WD14 0.15 / SigLIP 2 0.15 / DreamSim 0.15 / DINOv2 0.10）です。
 
 ## スコアの妥当性（キャリブレーション）
 
@@ -56,6 +62,7 @@ models:
 | メトリクス | 生値 | 無関係 (0点) | 別キャラ (30点) | 同一キャラ (70点) | 近似複製 (100点) | AUC 同一 vs 別キャラ |
 |---|---|---|---|---|---|---|
 | CCIP | difference | 0.461 ※ | 0.327 | 0.074 | 0.004 | 0.999 |
+| PixAI Tagger | cosine | 0.282 | 0.508 | 0.742 | 0.978 | 0.960 |
 | SigLIP 2 | cosine | 0.566 | 0.800 | 0.904 | 0.988 | 0.949 |
 | WD14 | cosine | 0.451 | 0.530 | 0.748 | 0.991 | 0.944 |
 | DreamSim | distance | 0.758 | 0.532 | 0.314 | 0.023 | 0.941 |
@@ -66,14 +73,17 @@ models:
 別キャラの 95 パーセンタイルを使っています。この目盛りではモデル既定の判定閾値 0.178 が約 54 点に当たり、
 「50 点前後 = 同一キャラかどうかの境界」と読めます。
 
-**重みの根拠**: 同一キャラ vs 別キャラ の AUC に基づき、最も識別力の高い CCIP を 0.30、
-同程度の SigLIP 2 / WD14 / DreamSim を各 0.20、キャラ識別に弱く構図・形状向けの DINOv2 を 0.10 にしています。
+**重みの根拠**: 同一キャラ vs 別キャラ の AUC に基づき、最も識別力の高い CCIP を 0.25、次点の PixAI Tagger を 0.20、
+同程度の SigLIP 2 / WD14 / DreamSim を各 0.15、キャラ識別に弱く構図・形状向けの DINOv2 を 0.10 にしています。
+`ENABLE_PIXAI=0` の場合は PixAI を除いた重みで再正規化されます。
 
 **CCIP の適用ガード**: WD14 で `no_humans` が付き人物タグ（solo / 1girl / 1boy など）が無い画像が含まれる場合、
 CCIP は「対象外」として総合スコアから除外し、残りの重みで正規化します（風景に対して CCIP が
 境界付近の値を返してしまう問題への対処）。複数キャラが検出された場合はスコアを出しつつ注意書きを表示します。
 
 **POC からの主な変更点**
+- PixAI Tagger v1.0 をタグ系メトリクスとして追加（同一 vs 別キャラ AUC 0.960 で WD14 より高い）
+- ZeroGPU 対応（`@spaces.GPU` 内で torch 系モデルを CUDA へ移動、CPU でもそのまま動作）
 - 生値→スコアの変換を「勘で置いた線形アンカー」から「実測中央値による区分線形マップ」に変更
 - CCIP の閾値取得失敗時のフォールバックが 0.35 だった誤りを修正（モデル既定値は 0.178）
 - DINOv3（ゲート付き）→ 公開モデルの DINOv2-small に固定し、torch.hub 依存を廃止
@@ -91,7 +101,21 @@ pip install -r requirements.txt gradio
 python app.py
 ```
 
-初回起動時にモデル（合計約 2.5GB）が `~/.cache` にダウンロードされます。
+初回起動時にモデル（合計約 4.5GB、うち PixAI Tagger が約 2GB）が `~/.cache` にダウンロードされます。
+
+環境変数:
+
+| 変数 | 既定値 | 説明 |
+|---|---|---|
+| `ENABLE_PIXAI` | `1` | `0` で PixAI Tagger を無効化（CPU 環境で軽くしたい場合） |
+| `DINO_MODEL` | `facebook/dinov2-small` | DINO 系モデル（変更した場合は再較正が必要） |
+| `DREAMSIM_CACHE` | `~/.cache/dreamsim` | DreamSim 重みの保存先 |
+
+## Space のハードウェア
+
+ZeroGPU では `run()` が `@spaces.GPU` で包まれ、torch 系モデル（SigLIP 2 / DINOv2 / DreamSim / PixAI）が
+関数内で CUDA に移されます。CPU Space やローカルでは同じコードがそのまま CPU で動きます
+（ONNX 系の CCIP / WD14 は常に CPU）。
 
 CLI での確認:
 
@@ -115,7 +139,7 @@ app.py                              # Gradio UI
 similarity.py                       # 埋め込み抽出・スコア化・総合スコア（CALIBRATION / WEIGHTS）
 calibration/calibrate.py            # 実画像ペアで生値の分布を実測するスクリプト
 calibration/calibration_result.json # 実測結果（アンカー値・AUC・処理時間）
-samples/                            # プロシージャル生成の簡易サンプル（実イラストではない）
+samples/                            # サンプル画像（ココア / モカ、シロコ / フブキ、天下一品ロゴ / 進入禁止標識、プロシージャル生成の簡易キャラ・風景）
 requirements.txt
 ```
 
