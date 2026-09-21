@@ -697,7 +697,7 @@ def total_score(results: dict):
         if r and "score" in r:
             num += r["score"] * w
             den += w
-    return round(num / den, 2) if den else None
+    return round(num / den, 3) if den else None
 
 
 def band_label(score: float) -> str:
@@ -718,12 +718,12 @@ def score_breakdown(results: dict):
         r = results.get(key)
         if r and "score" in r:
             contrib = r["score"] * w
-            rows.append([info["label"], round(r["score"], 2), w, round(contrib, 2)])
+            rows.append([info["label"], round(r["score"], 3), w, round(contrib, 3)])
             num += contrib
             den += w
         else:
             rows.append([info["label"], "-", w, "対象外" if r and "skipped" in r else "計算失敗"])
-    return rows, (round(num / den, 2) if den else None), den
+    return rows, (round(num / den, 3) if den else None), den
 
 
 def make_comment(results: dict) -> str:

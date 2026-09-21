@@ -63,7 +63,7 @@ def _metric_card(key: str, r: dict) -> str:
         return f"{head}\n\n### 対象外\n\n{r['skipped']}  \n<small>{ref}総合スコアには含めません</small>"
     body = (
         f"{head}\n\n"
-        f"### {r['score']:.2f} / 100\n"
+        f"### {r['score']:.3f} / 100\n"
         f"{_score_bar(r['score'])}\n\n"
         f"**→ {r['interp']}**  \n<small>{r['detail']}</small>"
     )
@@ -93,7 +93,7 @@ def run(img_a, img_b, progress=gr.Progress()):
         summary = "## ⚠️ すべてのメトリクスで計算に失敗しました"
     else:
         summary = (
-            f"## 総合スコア: {total:.2f} / 100（{similarity.band_label(total)}）\n"
+            f"## 総合スコア: {total:.3f} / 100（{similarity.band_label(total)}）\n"
             f"{_score_bar(total)}\n\n"
             + "\n".join(f"- {line}" for line in res["comment"].splitlines())
         )
