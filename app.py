@@ -31,7 +31,19 @@ EXAMPLES = [
     # 天下一品ロゴ vs 進入禁止標識（似ていると言われる有名な組み合わせ。非アニメ画像の例）
     [str(SAMPLES_DIR / "tenkaippin_01.jpg"), str(SAMPLES_DIR / "shinnyu_kinshi_02.jpg")],
 ]
-EXAMPLES = [e for e in EXAMPLES if all(Path(p).exists() for p in e)]
+
+
+def _is_image(path: str) -> bool:
+    """実体のある画像のみ許可（git-lfs 未導入で clone すると LFS ポインタのテキストになるため）"""
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
+
+
+EXAMPLES = [e for e in EXAMPLES if all(_is_image(p) for p in e)]
 
 BREAKDOWN_HEADERS = ["メトリクス", "スコア", "重み", "寄与"]
 

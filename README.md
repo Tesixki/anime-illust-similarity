@@ -133,12 +133,23 @@ CCIP は「対象外」として総合スコアから除外し、残りの重み
 
 ## ローカルでの起動
 
+ソースは GitHub（[Tesixki/anime-illust-similarity](https://github.com/Tesixki/anime-illust-similarity)）と
+Hugging Face Space（[rurukikiki/anime-illust-similarity](https://huggingface.co/spaces/rurukikiki/anime-illust-similarity)）で同じものです。
+サンプル画像は Git LFS 管理なので、clone 前に [git-lfs](https://git-lfs.com/) を入れておいてください
+（未導入でも動きますが、サンプルが表示されません）。
+
 ```bash
+git lfs install
+git clone https://github.com/Tesixki/anime-illust-similarity.git
+cd anime-illust-similarity
 python -m venv .venv
 # Windows: .venv\Scripts\activate  /  macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt gradio
 python app.py
 ```
+
+Python 3.10〜3.12 で動作確認しています。GPU は不要ですが、CPU では 1 組あたり 1〜2 分かかります
+（PixAI Tagger が大半なので、軽くしたい場合は `ENABLE_PIXAI=0`）。
 
 初回起動時にモデル（合計約 4.5GB、うち PixAI Tagger が約 2GB）が `~/.cache` にダウンロードされます。
 
