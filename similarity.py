@@ -1,6 +1,6 @@
 """イラスト類似度メトリクス計算モジュール
 
-2枚のイラストについて、以下6系統の類似度を計算し 0〜100 のスコアに変換する。
+2枚のイラストについて、以下8系統の類似度を計算し 0〜100 のスコアに変換する。
 CPU / ZeroGPU の両方で動作し、モデルは初回呼び出し時（Spaceでは起動時）に自動でダウンロードされる。
 
 - CCIP     : アニメキャラクターの同一性（deepghs/imgutils, ONNX）
@@ -9,10 +9,13 @@ CPU / ZeroGPU の両方で動作し、モデルは初回呼び出し時（Space�
 - DreamSim : 知覚的類似度（CLIP+DINO+OpenCLIP アンサンブルを人間の判断で微調整）
 - SigLIP 2 : 画像内容のセマンティック類似度（OpenCLIP ViT-B-16-SigLIP2-256 / WebLI）
 - DINOv2   : 自己教師あり視覚特徴の類似度（facebook/dinov2-small, CLS埋め込み）
+- Depth    : 構図類似度（Depth Anything V2 Small の深度マップ相関）
+- DWPose   : ポーズ類似度（rtmlib DWPose, OpenPose 18 点の四肢向き比較）
 
-スコア化（生値 -> 0〜100）は `calibration/calibrate.py` で実画像ペアを
-4カテゴリ（近似複製 / 同一キャラ / 別キャラ / 無関係）に分けて実測した分布に
-基づく区分線形マップ。アンカー値は `CALIBRATION` を参照。
+スコア化（生値 -> 0〜100）は `calibration/calibrate.py`（キャラ同一性系: 近似複製 / 同一キャラ /
+別キャラ / 無関係）と `calibration/calibrate_composition.py`（構図・ポーズ: 同構図 / 反転・トリミング /
+別カット / 無関係）で実画像ペアの分布を実測し、その中央値をアンカーにした区分線形マップ。
+アンカー値は `CALIBRATION` を参照。
 
 単体での動作確認:
     python similarity.py image_a.png image_b.png
@@ -58,7 +61,7 @@ CALIBRATION = {
     # 値は calibration/calibrate_composition.py の実測中央値（calibration_composition.json）。
     # ポーズは無関係画像がほぼ対象外になるため、0 点アンカーは別カットの 5 パーセンタイル。
     "depth": {"kind": "cosine", "anchors": (0.285, 0.451, 0.805, 0.999)},
-    "pose": {"kind": "cosine", "anchors": (-0.016, 0.852, 0.984, 1.000)},
+    "pose": {"kind": "cosine", "anchors": (-0.164, 0.806, 0.978, 1.000)},
 }
 
 
@@ -463,9 +466,15 @@ def depth_metric(d1: dict, d2: dict) -> dict:
 #   両画像で信頼度 >= POSE_KPT_THR の関節ペアが POSE_MIN_LIMBS 未満なら「対象外」。
 # ---------------------------------------------------------------------------
 
-POSE_KPT_THR = 0.5
+POSE_MODE = os.environ.get("POSE_MODE", "performance")  # rtmlib: lightweight / balanced / performance
+# 関節信頼度の閾値。performance モード（rtmw-dw-x-l 384x288）の ONNX は信頼度が未正規化
+# （可視の目/鼻で 5〜7、可視の手首で 3〜6、首・肩で 2.6〜3.8、隠れた手首や膝で 1.6〜2.8、
+# 人物なし画像で 0.9〜3.3）なので、実測に基づき 2.8 を使う。balanced / lightweight は 0〜1 で 0.5。
+POSE_KPT_THR = float(os.environ.get("POSE_KPT_THR", "2.8" if POSE_MODE == "performance" else "0.5"))
 POSE_MIN_LIMBS = 4
-POSE_MODE = os.environ.get("POSE_MODE", "balanced")  # rtmlib: lightweight / balanced / performance
+POSE_TTA = os.environ.get("POSE_TTA", "1") != "0"  # 左右反転して 2 回推定し、座標を信頼度で加重平均
+# OpenPose 18 点の左右対応（反転 TTA 用）
+POSE_LR_SWAP = [(2, 5), (3, 6), (4, 7), (8, 11), (9, 12), (10, 13), (14, 15), (16, 17)]
 # OpenPose 18 点: 0鼻 1首 2右肩 3右肘 4右手首 5左肩 6左肘 7左手首 8右腰 9右膝 10右足首
 #                11左腰 12左膝 13左足首 14右目 15左目 16右耳 17左耳
 POSE_LIMBS = [
@@ -489,27 +498,58 @@ def _get_pose():
     return _cached("pose", build)
 
 
-def pose_embed(img: Image.Image) -> dict:
-    import cv2
-    from rtmlib import draw_skeleton
-
-    (wb,) = _get_pose()
-    bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-    kpts, scores = wb(bgr)  # (N, 134, 2), (N, 134)
-    out = {"n_people": int(kpts.shape[0]), "kpts": None, "scores": None, "vis": img}
-    if kpts.shape[0] == 0:
-        return out
-    # 有効関節のバウンディングボックスが最大の人物を採用
+def _pose_pick_person(kpts: np.ndarray, scores: np.ndarray) -> int:
+    """有効関節のバウンディングボックスが最大の人物のインデックスを返す。"""
     best, best_area = 0, -1.0
     for i in range(kpts.shape[0]):
         v = kpts[i, :18][scores[i, :18] >= POSE_KPT_THR]
         area = float(np.prod(v.max(0) - v.min(0))) if len(v) >= 2 else 0.0
         if area > best_area:
             best, best_area = i, area
-    out["kpts"] = kpts[best, :18].astype(np.float32)
-    out["scores"] = scores[best, :18].astype(np.float32)
-    vis = draw_skeleton(bgr.copy(), kpts[best : best + 1], scores[best : best + 1],
-                        openpose_skeleton=True, kpt_thr=POSE_KPT_THR)
+    return best
+
+
+def _pose_flip_back(kpts: np.ndarray, scores: np.ndarray, width: int):
+    """反転画像で推定した関節を元画像の座標系に戻し、左右のラベルを入れ替える。"""
+    kpts = kpts.copy()
+    scores = scores.copy()
+    kpts[:, 0] = width - 1 - kpts[:, 0]
+    for a, b in POSE_LR_SWAP:
+        kpts[[a, b]] = kpts[[b, a]]
+        scores[[a, b]] = scores[[b, a]]
+    return kpts, scores
+
+
+def pose_embed(img: Image.Image) -> dict:
+    import cv2
+    from rtmlib import draw_skeleton
+
+    (wb,) = _get_pose()
+    bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+    bboxes = wb.det_model(bgr)
+    if len(bboxes) == 0:  # 人物検出に失敗した場合は画面全体を 1 人として推定（バストアップ等の保険）
+        bboxes = [[0, 0, w, h]]
+    kpts, scores = wb.pose_model(bgr, bboxes=bboxes)  # (N, 134, 2), (N, 134)
+    out = {"n_people": int(kpts.shape[0]), "kpts": None, "scores": None, "vis": img}
+    if kpts.shape[0] == 0:
+        return out
+    best = _pose_pick_person(kpts, scores)
+    kp = kpts[best, :18].astype(np.float32)
+    sc = scores[best, :18].astype(np.float32)
+
+    if POSE_TTA:  # 左右反転 TTA: 同じ人物ボックスを反転して再推定し、信頼度で加重平均
+        fb = [[w - 1 - b[2], b[1], w - 1 - b[0], b[3]] for b in [bboxes[best]]]
+        kf, sf = wb.pose_model(np.ascontiguousarray(bgr[:, ::-1]), bboxes=fb)
+        if kf.shape[0]:
+            kf, sf = _pose_flip_back(kf[0, :18].astype(np.float32), sf[0, :18].astype(np.float32), w)
+            wsum = sc + sf + 1e-6
+            kp = (kp * sc[:, None] + kf * sf[:, None]) / wsum[:, None]
+            sc = (sc + sf) / 2.0
+
+    out["kpts"] = kp
+    out["scores"] = sc
+    vis = draw_skeleton(bgr.copy(), kp[None], sc[None], openpose_skeleton=True, kpt_thr=POSE_KPT_THR)
     out["vis"] = Image.fromarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
     return out
 
@@ -520,9 +560,10 @@ def pose_metric(p1: dict, p2: dict) -> dict:
         who = "両方" if p1["kpts"] is None and p2["kpts"] is None else ("画像A" if p1["kpts"] is None else "画像B")
         return {**base, "skipped": f"{who}で人物（ポーズ）を検出できませんでした", "raw": None}
 
-    cos_list, names = [], []
+    cos_list, names, weights = [], [], []
     for (i, j), name in zip(POSE_LIMBS, POSE_LIMB_NAMES):
-        if min(p1["scores"][i], p1["scores"][j], p2["scores"][i], p2["scores"][j]) < POSE_KPT_THR:
+        conf = min(p1["scores"][i], p1["scores"][j], p2["scores"][i], p2["scores"][j])
+        if conf < POSE_KPT_THR:
             continue
         v1 = p1["kpts"][j] - p1["kpts"][i]
         v2 = p2["kpts"][j] - p2["kpts"][i]
@@ -531,13 +572,14 @@ def pose_metric(p1: dict, p2: dict) -> dict:
             continue
         cos_list.append(float(v1 @ v2 / (n1 * n2)))
         names.append(name)
+        weights.append(float(conf))  # 信頼度の低い関節ペアほど寄与を小さくする
     if len(cos_list) < POSE_MIN_LIMBS:
         return {
             **base,
             "skipped": f"両画像で共通して検出できた関節ペアが {len(cos_list)} 本のみ（{POSE_MIN_LIMBS} 本以上必要）",
             "raw": None,
         }
-    raw = float(np.mean(cos_list))
+    raw = float(np.average(cos_list, weights=weights))
     c = CALIBRATION["pose"]
     score = _piecewise_score(raw, c["anchors"], c["kind"])
     worst = sorted(zip(cos_list, names))[:3]
@@ -655,7 +697,7 @@ def total_score(results: dict):
         if r and "score" in r:
             num += r["score"] * w
             den += w
-    return round(num / den) if den else None
+    return round(num / den, 2) if den else None
 
 
 def band_label(score: float) -> str:
@@ -676,12 +718,12 @@ def score_breakdown(results: dict):
         r = results.get(key)
         if r and "score" in r:
             contrib = r["score"] * w
-            rows.append([info["label"], round(r["score"], 1), w, round(contrib, 1)])
+            rows.append([info["label"], round(r["score"], 2), w, round(contrib, 2)])
             num += contrib
             den += w
         else:
             rows.append([info["label"], "-", w, "対象外" if r and "skipped" in r else "計算失敗"])
-    return rows, (round(num / den) if den else None), den
+    return rows, (round(num / den, 2) if den else None), den
 
 
 def make_comment(results: dict) -> str:
