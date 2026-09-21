@@ -26,6 +26,8 @@ EXAMPLES = [
     [str(SAMPLES_DIR / "hoto-cocoa.png"), str(SAMPLES_DIR / "hoto-mocha.png")],
     # ブルーアーカイブのシロコ vs ホロライブの白上フブキ（別キャラだが銀髪・獣耳など属性が近い例）
     [str(SAMPLES_DIR / "shiroko.png"), str(SAMPLES_DIR / "fubuki.png")],
+    # パピルス vs マリ（別作品・別キャラだが、橙髪・フード・胸元で手を組むポーズと構図が近い例）
+    [str(SAMPLES_DIR / "papyrus.png"), str(SAMPLES_DIR / "mari.png")],
     # 天下一品ロゴ vs 進入禁止標識（似ていると言われる有名な組み合わせ。非アニメ画像の例）
     [str(SAMPLES_DIR / "tenkaippin_01.jpg"), str(SAMPLES_DIR / "shinnyu_kinshi_02.jpg")],
 ]
@@ -57,10 +59,8 @@ def _metric_card(key: str, r: dict) -> str:
     if "error" in r:
         return f"{head}\n\n⚠️ 計算失敗: `{r['error']}`"
     if "skipped" in r:
-        return (
-            f"{head}\n\n### 対象外\n\n{r['skipped']}  \n"
-            f"<small>参考: difference={r['raw']:.3f}（総合スコアには含めません）</small>"
-        )
+        ref = f"参考値 {r['raw']:.3f} / " if r.get("raw") is not None else ""
+        return f"{head}\n\n### 対象外\n\n{r['skipped']}  \n<small>{ref}総合スコアには含めません</small>"
     body = (
         f"{head}\n\n"
         f"### {r['score']:.0f} / 100\n"
@@ -100,7 +100,13 @@ def run(img_a, img_b, progress=gr.Progress()):
     rows, _, den = similarity.score_breakdown(res)
     note = "" if den >= 0.999 else "※対象外・計算失敗のメトリクスを除き、残りの重みで正規化しています"
     cards = [_metric_card(k, res.get(k, {})) for k in similarity.METRICS]
-    return [summary, rows, note, *cards]
+    vis = [
+        res.get("depth", {}).get("vis_a"),
+        res.get("depth", {}).get("vis_b"),
+        res.get("pose", {}).get("vis_a"),
+        res.get("pose", {}).get("vis_b"),
+    ]
+    return [summary, rows, note, *cards, *vis]
 
 
 WEIGHT_TEXT = " / ".join(
@@ -134,9 +140,15 @@ HOW_TO_READ = f"""
 |---|---|---|---|---|---|
 {CALIB_TABLE}
 
+**構図・ポーズの較正カテゴリ**: この 2 つは「キャラが同じか」ではなく「配置・ポーズが同じか」を測るため、
+較正カテゴリを 無関係=0 / 別カット（同一・別キャラ問わず別の絵）=30 / 反転・トリミング=70 / 同構図（明度・JPEG・縮小のみ）=100 に置き換えています。
+
 **生値の意味**
 - SigLIP 2 / DINOv2 / WD14 / PixAI `cosine`: 埋め込みのコサイン類似度。1.0 で完全一致
 - DreamSim `distance`: 知覚的距離。0 で完全一致
+- Depth `corr`: 正規化した深度マップ（64×64）のピアソン相関。1.0 で完全一致。左右反転は別構図扱い
+- DWPose `limb cos`: 両画像で検出できた関節ペア（四肢）の向きベクトルのコサイン平均。1.0 で完全一致。
+  人物が検出できない、または共通の関節ペアが 4 本未満なら「対象外」
 - CCIP `difference`: キャラ間の距離。モデル既定の閾値 0.178 未満なら同一キャラ判定（このスケールで約 54 点）。
   CCIP は「別キャラ」と「無関係画像」を区別しないため、0 点のアンカーだけ別キャラの 95 パーセンタイルを使用
 
@@ -162,10 +174,20 @@ with gr.Blocks(title="イラスト一致度スコア") as demo:
     summary = gr.Markdown()
     cards = []
     keys = list(similarity.METRICS)
-    for i in range(0, len(keys), 3):  # 3 列ずつ並べる
+    for i in range(0, len(keys), 4):  # 4 列ずつ並べる
         with gr.Row():
-            for _ in keys[i : i + 3]:
+            for _ in keys[i : i + 4]:
                 cards.append(gr.Markdown())
+    with gr.Accordion("構図・ポーズの可視化（Depth マップ / OpenPose 骨格）", open=True):
+        with gr.Row():
+            vis_depth_a = gr.Image(label="Depth 画像A", interactive=False, height=300)
+            vis_depth_b = gr.Image(label="Depth 画像B", interactive=False, height=300)
+            vis_pose_a = gr.Image(label="ポーズ 画像A", interactive=False, height=300)
+            vis_pose_b = gr.Image(label="ポーズ 画像B", interactive=False, height=300)
+        gr.Markdown(
+            "<small>Depth: 明るいほど手前（Depth Anything V2 の相対深度）。"
+            "ポーズ: 信頼度 0.5 以上の関節のみ描画（DWPose, OpenPose 18 点形式）。</small>"
+        )
     with gr.Accordion("スコアの内訳", open=False):
         breakdown = gr.Dataframe(
             headers=BREAKDOWN_HEADERS, datatype=["str", "str", "number", "str"],
@@ -179,11 +201,15 @@ with gr.Blocks(title="イラスト一致度スコア") as demo:
         gr.Examples(
             examples=EXAMPLES,
             inputs=[img_a, img_b],
-            label="サンプル（ココア vs モカ / シロコ vs フブキ / 天下一品ロゴ vs 進入禁止標識）",
+            label="サンプル（ココア vs モカ / シロコ vs フブキ / パピルス vs マリ / 天下一品ロゴ vs 進入禁止標識）",
             cache_examples=False,
         )
 
-    btn.click(run, inputs=[img_a, img_b], outputs=[summary, breakdown, note, *cards])
+    btn.click(
+        run,
+        inputs=[img_a, img_b],
+        outputs=[summary, breakdown, note, *cards, vis_depth_a, vis_depth_b, vis_pose_a, vis_pose_b],
+    )
 
 
 if __name__ == "__main__":

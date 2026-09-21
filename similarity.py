@@ -54,6 +54,11 @@ CALIBRATION = {
     "ccip": {"kind": "distance", "anchors": (0.461, 0.327, 0.074, 0.004)},
     "wd14": {"kind": "cosine", "anchors": (0.451, 0.530, 0.748, 0.991)},
     "pixai": {"kind": "cosine", "anchors": (0.282, 0.508, 0.742, 0.978)},
+    # 構図・ポーズは較正カテゴリが異なる（無関係=0 / 別カット=30 / 反転・トリミング=70 / 同構図=100）。
+    # 値は calibration/calibrate_composition.py の実測中央値（calibration_composition.json）。
+    # ポーズは無関係画像がほぼ対象外になるため、0 点アンカーは別カットの 5 パーセンタイル。
+    "depth": {"kind": "cosine", "anchors": (0.285, 0.451, 0.805, 0.999)},
+    "pose": {"kind": "cosine", "anchors": (-0.016, 0.852, 0.984, 1.000)},
 }
 
 
@@ -100,7 +105,7 @@ def set_device(device: str) -> str:
 
     if device.startswith("cuda") and not torch.cuda.is_available():
         device = "cpu"
-    for key in ("siglip", "dino", "dreamsim", "pixai"):
+    for key in ("siglip", "dino", "dreamsim", "pixai", "depth"):
         if key in _CACHE:
             model = _CACHE[key][0]
             model.to(device)
@@ -186,7 +191,7 @@ def dinov2_metric(e1: np.ndarray, e2: np.ndarray) -> dict:
     return {
         "raw": cos,
         "score": score,
-        "interp": _interp_by_score(score, "構図・形状"),
+        "interp": _interp_by_score(score, "全体の視覚特徴"),
         "detail": f"cosine={cos:.3f}（1.0で完全一致 / {DINO_MODEL.split('/')[-1]}）",
     }
 
@@ -384,6 +389,175 @@ def pixai_metric(w1: dict, w2: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 構図類似度（Depth Anything V2 Small の深度マップ比較）
+#   単眼深度（相対値）を画像ごとに正規化 -> 64x64 に縮小 -> ピアソン相関。
+#   「前景/背景の分離」「被写体の画面内配置と大きさ」「引き/寄り」を捉える。
+#   左右反転は別構図として扱う（相関が下がる）。
+# ---------------------------------------------------------------------------
+
+DEPTH_MODEL = os.environ.get("DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Small-hf")
+DEPTH_GRID = 64
+
+
+def _get_depth():
+    def build():
+        import torch
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+        proc = AutoImageProcessor.from_pretrained(DEPTH_MODEL)
+        model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL)
+        model.eval().to(_DEVICE)
+        return model, proc, torch
+
+    return _cached("depth", build)
+
+
+def _depth_colorize(d: np.ndarray) -> Image.Image:
+    import cv2
+
+    dn = (d - d.min()) / (d.max() - d.min() + 1e-6)
+    vis = cv2.applyColorMap((dn * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    return Image.fromarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+
+
+def depth_embed(img: Image.Image) -> dict:
+    import cv2
+
+    model, proc, torch = _get_depth()
+    with torch.no_grad():
+        inputs = {k: v.to(_DEVICE) for k, v in proc(images=img, return_tensors="pt").items()}
+        d = model(**inputs).predicted_depth[0].float().cpu().numpy()
+    # 元画像のアスペクトに戻してから固定グリッドへ（正規化で相対深度のスケール/オフセットを消す）
+    d_img = cv2.resize(d, img.size, interpolation=cv2.INTER_LINEAR)
+    small = cv2.resize(d_img, (DEPTH_GRID, DEPTH_GRID), interpolation=cv2.INTER_AREA)
+    small = (small - np.median(small)) / (small.std() + 1e-6)
+    return {"map": small.astype(np.float32), "vis": _depth_colorize(d_img)}
+
+
+def depth_metric(d1: dict, d2: dict) -> dict:
+    a, b = d1["map"].ravel(), d2["map"].ravel()
+    corr = float(np.corrcoef(a, b)[0, 1])
+    corr_flip = float(np.corrcoef(a, d2["map"][:, ::-1].ravel())[0, 1])
+    c = CALIBRATION["depth"]
+    score = _piecewise_score(corr, c["anchors"], c["kind"])
+    detail = f"depth corr={corr:.3f}（1.0で完全一致）"
+    note = None
+    if corr_flip > corr + 0.15:
+        note = f"左右反転すると一致度が上がります（反転時 corr={corr_flip:.3f}）: 鏡像構図の可能性"
+    return {
+        "raw": corr,
+        "score": score,
+        "interp": _interp_by_score(score, "構図（奥行き配置）"),
+        "detail": detail,
+        "note": note,
+        "vis_a": d1["vis"],
+        "vis_b": d2["vis"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# ポーズ類似度（DWPose / rtmlib, OpenPose 18 点形式）
+#   四肢（関節ペア）の向きベクトルのコサインを平均する角度ベースの指標。
+#   位置・スケールに不変で「同じポーズか」を測る（画面内配置は Depth 側が担当）。
+#   両画像で信頼度 >= POSE_KPT_THR の関節ペアが POSE_MIN_LIMBS 未満なら「対象外」。
+# ---------------------------------------------------------------------------
+
+POSE_KPT_THR = 0.5
+POSE_MIN_LIMBS = 4
+POSE_MODE = os.environ.get("POSE_MODE", "balanced")  # rtmlib: lightweight / balanced / performance
+# OpenPose 18 点: 0鼻 1首 2右肩 3右肘 4右手首 5左肩 6左肘 7左手首 8右腰 9右膝 10右足首
+#                11左腰 12左膝 13左足首 14右目 15左目 16右耳 17左耳
+POSE_LIMBS = [
+    (1, 2), (1, 5), (2, 3), (3, 4), (5, 6), (6, 7),
+    (1, 8), (8, 9), (9, 10), (1, 11), (11, 12), (12, 13),
+    (1, 0), (0, 14), (14, 16), (0, 15), (15, 17),
+]
+POSE_LIMB_NAMES = [
+    "首→右肩", "首→左肩", "右上腕", "右前腕", "左上腕", "左前腕",
+    "首→右腰", "右大腿", "右下腿", "首→左腰", "左大腿", "左下腿",
+    "首→鼻", "鼻→右目", "右目→右耳", "鼻→左目", "左目→左耳",
+]
+
+
+def _get_pose():
+    def build():
+        from rtmlib import Wholebody
+
+        return (Wholebody(to_openpose=True, mode=POSE_MODE, backend="onnxruntime", device="cpu"),)
+
+    return _cached("pose", build)
+
+
+def pose_embed(img: Image.Image) -> dict:
+    import cv2
+    from rtmlib import draw_skeleton
+
+    (wb,) = _get_pose()
+    bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    kpts, scores = wb(bgr)  # (N, 134, 2), (N, 134)
+    out = {"n_people": int(kpts.shape[0]), "kpts": None, "scores": None, "vis": img}
+    if kpts.shape[0] == 0:
+        return out
+    # 有効関節のバウンディングボックスが最大の人物を採用
+    best, best_area = 0, -1.0
+    for i in range(kpts.shape[0]):
+        v = kpts[i, :18][scores[i, :18] >= POSE_KPT_THR]
+        area = float(np.prod(v.max(0) - v.min(0))) if len(v) >= 2 else 0.0
+        if area > best_area:
+            best, best_area = i, area
+    out["kpts"] = kpts[best, :18].astype(np.float32)
+    out["scores"] = scores[best, :18].astype(np.float32)
+    vis = draw_skeleton(bgr.copy(), kpts[best : best + 1], scores[best : best + 1],
+                        openpose_skeleton=True, kpt_thr=POSE_KPT_THR)
+    out["vis"] = Image.fromarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+    return out
+
+
+def pose_metric(p1: dict, p2: dict) -> dict:
+    base = {"vis_a": p1["vis"], "vis_b": p2["vis"]}
+    if p1["kpts"] is None or p2["kpts"] is None:
+        who = "両方" if p1["kpts"] is None and p2["kpts"] is None else ("画像A" if p1["kpts"] is None else "画像B")
+        return {**base, "skipped": f"{who}で人物（ポーズ）を検出できませんでした", "raw": None}
+
+    cos_list, names = [], []
+    for (i, j), name in zip(POSE_LIMBS, POSE_LIMB_NAMES):
+        if min(p1["scores"][i], p1["scores"][j], p2["scores"][i], p2["scores"][j]) < POSE_KPT_THR:
+            continue
+        v1 = p1["kpts"][j] - p1["kpts"][i]
+        v2 = p2["kpts"][j] - p2["kpts"][i]
+        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+        if n1 < 1e-3 or n2 < 1e-3:
+            continue
+        cos_list.append(float(v1 @ v2 / (n1 * n2)))
+        names.append(name)
+    if len(cos_list) < POSE_MIN_LIMBS:
+        return {
+            **base,
+            "skipped": f"両画像で共通して検出できた関節ペアが {len(cos_list)} 本のみ（{POSE_MIN_LIMBS} 本以上必要）",
+            "raw": None,
+        }
+    raw = float(np.mean(cos_list))
+    c = CALIBRATION["pose"]
+    score = _piecewise_score(raw, c["anchors"], c["kind"])
+    worst = sorted(zip(cos_list, names))[:3]
+    note = None
+    if p1["n_people"] > 1 or p2["n_people"] > 1:
+        note = f"複数人物を検出（A: {p1['n_people']} / B: {p2['n_people']}）。最も大きい人物同士で比較しています"
+    return {
+        **base,
+        "raw": raw,
+        "score": score,
+        "interp": _interp_by_score(score, "ポーズ"),
+        "detail": (
+            f"limb cos={raw:.3f}（1.0で完全一致, 比較した関節ペア {len(cos_list)} 本）"
+            + (" / 差が大きい部位: " + ", ".join(f"{n}({c:.2f})" for c, n in worst) if worst and worst[0][0] < 0.7 else "")
+        ),
+        "note": note,
+        "n_limbs": len(cos_list),
+    }
+
+
 def _interp_by_score(score: float, subject: str) -> str:
     if score >= 85:
         return f"{subject}がほぼ同じ"
@@ -433,9 +607,21 @@ METRICS = {
     },
     "dinov2": {
         "label": "視覚特徴類似度 (DINOv2)",
-        "desc": "自己教師あり学習の視覚特徴。構図・形状・オブジェクトの類似に強い。",
+        "desc": "自己教師あり学習の全体特徴（CLS）。物体・形状の類似に強いが位置情報は持たない。",
         "embed": dinov2_embed,
         "fn": dinov2_metric,
+    },
+    "depth": {
+        "label": "構図類似度 (Depth Anything V2)",
+        "desc": "深度マップの相関。被写体の画面内配置・大きさ・前景/背景の分離を比較する。",
+        "embed": depth_embed,
+        "fn": depth_metric,
+    },
+    "pose": {
+        "label": "ポーズ類似度 (DWPose)",
+        "desc": "OpenPose 形式の関節から四肢の向きを比較。位置・スケール不変。人物が取れない画像は対象外。",
+        "embed": pose_embed,
+        "fn": pose_metric,
     },
 }
 
@@ -447,10 +633,12 @@ METRICS = {
 WEIGHTS = {
     "ccip": 0.25,
     "pixai": 0.20,
-    "wd14": 0.15,
-    "siglip2": 0.15,
-    "dreamsim": 0.15,
-    "dinov2": 0.10,
+    "wd14": 0.10,
+    "siglip2": 0.10,
+    "dreamsim": 0.10,
+    "dinov2": 0.05,
+    "depth": 0.10,
+    "pose": 0.10,
 }
 
 
@@ -554,6 +742,8 @@ def preload(progress=None) -> None:
         ("DINOv2", _get_dino),
         ("DreamSim", _get_dreamsim),
         ("CCIP", _ccip_threshold),
+        ("Depth Anything V2", _get_depth),
+        ("DWPose", _get_pose),
     ] + ([("PixAI Tagger", _get_pixai)] if "pixai" in METRICS else [])
     for name, fn in loaders:
         if progress:

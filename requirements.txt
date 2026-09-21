@@ -4,7 +4,7 @@ torch>=2.4
 torchvision>=0.19
 
 Pillow>=10.0
-numpy
+numpy<2                 # dghs-imgutils の要件（opencv 5 系が numpy 2 を引き込むため明示）
 
 open_clip_torch>=2.32   # SigLIP 2 (ViT-B-16-SigLIP2-256, WebLI)
 transformers>=4.57      # DINOv2 (facebook/dinov2-small) / PixAI Tagger v1.0 (custom code)
@@ -14,3 +14,6 @@ dghs-imgutils>=0.15     # CCIP + WD14 tagger v3
 onnxruntime>=1.16       # imgutils の ONNX 推論バックエンド
 huggingface_hub
 spaces                  # ZeroGPU 対応（CPU Space では no-op）
+opencv-python<4.12      # rtmlib / 深度マップ描画
+opencv-contrib-python<4.12
+rtmlib                  # DWPose（ポーズ推定, ONNX）
