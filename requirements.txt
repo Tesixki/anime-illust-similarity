@@ -1,5 +1,5 @@
-# Hugging Face Space (CPU) 用。すべての推論はCPUで動作する。
---extra-index-url https://download.pytorch.org/whl/cpu
+# Hugging Face Space 用。CPU Space / ZeroGPU の両方で動作する。
+# （ローカルCPU環境で軽量に入れたい場合: pip install torch --index-url https://download.pytorch.org/whl/cpu）
 torch>=2.4
 torchvision>=0.19
 
