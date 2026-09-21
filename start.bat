@@ -32,7 +32,7 @@ if not exist "%PY%" (
 if exist "%VENV%\.deps_installed" goto :run
 echo [setup] Installing dependencies ^(first run only, this takes several minutes^)...
 "%PY%" -m pip install --upgrade pip
-rem NVIDIA GPU があれば CUDA 版 torch を先に入れる（PyPI の Windows 向け torch は CPU 版のため）
+rem If an NVIDIA GPU is present, install the CUDA build of torch first (PyPI torch for Windows is CPU-only)
 where nvidia-smi >nul 2>nul
 if errorlevel 1 goto :deps_cpu
 echo [setup] NVIDIA GPU detected - installing CUDA build of torch ^(about 3GB^)...
