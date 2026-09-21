@@ -6,6 +6,14 @@
 
 from pathlib import Path
 
+try:  # ZeroGPU Space では @spaces.GPU が必須。CPU Space / ローカルでは no-op
+    import spaces  # noqa: F401  (torch より先に import する必要がある)
+
+    _gpu = spaces.GPU(duration=120)
+except Exception:  # spaces 未インストール等
+    def _gpu(fn):
+        return fn
+
 import gradio as gr
 from PIL import Image
 
@@ -62,10 +70,15 @@ def _metric_card(key: str, r: dict) -> str:
     return body
 
 
+@_gpu
 def run(img_a, img_b, progress=gr.Progress()):
     if img_a is None or img_b is None:
         raise gr.Error("画像Aと画像Bの両方を指定してください")
     a, b = _shrink(img_a), _shrink(img_b)
+    try:  # GPU があれば torch 系モデルを CUDA で推論（ZeroGPU では関数内でのみ利用可）
+        similarity.set_device("cuda")
+    except Exception:
+        similarity.set_device("cpu")
 
     def on_progress(i, n, label):
         progress((i, n), desc=f"計算中: {label}")

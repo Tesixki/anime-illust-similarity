@@ -84,6 +84,27 @@ def _cached(key: str, builder):
     return _CACHE[key]
 
 
+_DEVICE = "cpu"
+
+
+def set_device(device: str) -> str:
+    """torch 系モデル（SigLIP 2 / DINOv2 / DreamSim）の推論デバイスを切り替える。
+
+    CUDA が使えない場合は cpu にフォールバックする。ONNX 系（CCIP / WD14）は常に CPU。
+    ZeroGPU Space では @spaces.GPU 関数の中で "cuda" を指定する。
+    """
+    global _DEVICE
+    import torch
+
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
+    for key in ("siglip", "dino", "dreamsim"):
+        if key in _CACHE:
+            _CACHE[key][0].to(device)
+    _DEVICE = device
+    return device
+
+
 # ---------------------------------------------------------------------------
 # SigLIP 2
 # ---------------------------------------------------------------------------
@@ -96,7 +117,7 @@ def _get_siglip():
         model, _, preprocess = open_clip.create_model_and_transforms(
             "ViT-B-16-SigLIP2-256", pretrained="webli"
         )
-        model.eval()
+        model.eval().to(_DEVICE)
         return model, preprocess, torch
 
     return _cached("siglip", build)
@@ -105,9 +126,9 @@ def _get_siglip():
 def siglip2_embed(img: Image.Image) -> np.ndarray:
     model, preprocess, torch = _get_siglip()
     with torch.no_grad():
-        f = model.encode_image(preprocess(img).unsqueeze(0))
+        f = model.encode_image(preprocess(img).unsqueeze(0).to(_DEVICE))
         f = f / f.norm(dim=-1, keepdim=True)
-    return f[0].numpy()
+    return f[0].float().cpu().numpy()
 
 
 def siglip2_metric(e1: np.ndarray, e2: np.ndarray) -> dict:
@@ -136,7 +157,7 @@ def _get_dino():
 
         proc = AutoImageProcessor.from_pretrained(DINO_MODEL)
         model = AutoModel.from_pretrained(DINO_MODEL)
-        model.eval()
+        model.eval().to(_DEVICE)
         return model, proc, torch
 
     return _cached("dino", build)
@@ -145,8 +166,9 @@ def _get_dino():
 def dinov2_embed(img: Image.Image) -> np.ndarray:
     model, proc, torch = _get_dino()
     with torch.no_grad():
-        out = model(**proc(images=img, return_tensors="pt"))
-    return out.pooler_output[0].numpy()
+        inputs = {k: v.to(_DEVICE) for k, v in proc(images=img, return_tensors="pt").items()}
+        out = model(**inputs)
+    return out.pooler_output[0].float().cpu().numpy()
 
 
 def dinov2_metric(e1: np.ndarray, e2: np.ndarray) -> dict:
@@ -178,6 +200,7 @@ def _get_dreamsim():
         model, preprocess = dreamsim(
             pretrained=True, device="cpu", cache_dir=DREAMSIM_CACHE
         )
+        model.to(_DEVICE)
         return model, preprocess, torch
 
     return _cached("dreamsim", build)
@@ -186,7 +209,7 @@ def _get_dreamsim():
 def dreamsim_embed(img: Image.Image) -> np.ndarray:
     model, preprocess, torch = _get_dreamsim()
     with torch.no_grad():
-        return model.embed(preprocess(img))[0].numpy()
+        return model.embed(preprocess(img).to(_DEVICE))[0].float().cpu().numpy()
 
 
 def dreamsim_metric(e1: np.ndarray, e2: np.ndarray) -> dict:
