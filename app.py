@@ -28,9 +28,6 @@ EXAMPLES = [
     [str(SAMPLES_DIR / "shiroko.png"), str(SAMPLES_DIR / "fubuki.png")],
     # 天下一品ロゴ vs 進入禁止標識（似ていると言われる有名な組み合わせ。非アニメ画像の例）
     [str(SAMPLES_DIR / "tenkaippin_01.jpg"), str(SAMPLES_DIR / "shinnyu_kinshi_02.jpg")],
-    [str(SAMPLES_DIR / "char_a_1.png"), str(SAMPLES_DIR / "char_a_2.png")],
-    [str(SAMPLES_DIR / "char_a_1.png"), str(SAMPLES_DIR / "char_b_1.png")],
-    [str(SAMPLES_DIR / "char_a_1.png"), str(SAMPLES_DIR / "landscape.png")],
 ]
 EXAMPLES = [e for e in EXAMPLES if all(Path(p).exists() for p in e)]
 
@@ -182,7 +179,7 @@ with gr.Blocks(title="イラスト一致度スコア") as demo:
         gr.Examples(
             examples=EXAMPLES,
             inputs=[img_a, img_b],
-            label="サンプル（ココア vs モカ / シロコ vs フブキ / 天下一品ロゴ vs 進入禁止標識 / プロシージャル生成の簡易画像）",
+            label="サンプル（ココア vs モカ / シロコ vs フブキ / 天下一品ロゴ vs 進入禁止標識）",
             cache_examples=False,
         )
 

@@ -10,7 +10,7 @@
     dup        : 同じ絵に軽い変換（左右反転 / 85%トリミング / 明度0.8 / JPEG q=30 / 半解像度）
     same_char  : 同じキャラの別の絵
     diff_char  : 別キャラ（同じディレクトリ群の中の別キャラ）
-    unrelated  : キャラ画像 vs samples/ の風景・無関係画像
+    unrelated  : キャラ画像 vs <画像ディレクトリ>/_unrelated/ の風景・無関係画像（任意）
 
 出力 JSON の stats[<cat>][<metric>].pct["50"] が similarity.CALIBRATION のアンカー値。
 """
@@ -72,11 +72,12 @@ def main(img_dir: Path, out_path: Path, n_aug_images: int = 12, n_diff_pairs: in
     imgs: dict[str, tuple[str, Image.Image]] = {}
     for p in sorted(img_dir.rglob("*")):
         if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and p.parent != img_dir:
-            imgs[f"{p.parent.name}/{p.stem}"] = (p.parent.name, Image.open(p).convert("RGB"))
-    for p in sorted((ROOT / "samples").glob("*.png")):
-        imgs[f"proc/{p.stem}"] = ("proc_" + p.stem, Image.open(p).convert("RGB"))
-    anime = [n for n in imgs if not n.startswith("proc/")]
-    proc = [n for n in imgs if n.startswith("proc/")]
+            if p.parent.name == "_unrelated":  # 無関係画像は 1 枚ずつ別グループ扱い
+                imgs[f"_unrelated/{p.stem}"] = ("_unrelated_" + p.stem, Image.open(p).convert("RGB"))
+            else:
+                imgs[f"{p.parent.name}/{p.stem}"] = (p.parent.name, Image.open(p).convert("RGB"))
+    anime = [n for n in imgs if not n.startswith("_unrelated/")]
+    proc = [n for n in imgs if n.startswith("_unrelated/")]
     if len(anime) < 4:
         sys.exit(f"画像が足りません: {img_dir}")
 

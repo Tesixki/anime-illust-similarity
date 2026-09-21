@@ -130,7 +130,8 @@ python calibration/calibrate.py <画像ディレクトリ> [出力JSON]
 ```
 
 `<画像ディレクトリ>/<キャラID>/*.jpg` の構成で画像を置くと、同じ 4 カテゴリで分布を再計測し、
-`CALIBRATION` に貼るためのアンカー値を出力します。自分のデータで目盛りを調整したい場合に使ってください。
+`CALIBRATION` に貼るためのアンカー値を出力します。無関係画像（風景など）は `<画像ディレクトリ>/_unrelated/` に置きます
+（省略時は unrelated カテゴリを計測しません）。自分のデータで目盛りを調整したい場合に使ってください。
 
 ## ファイル構成
 
@@ -139,7 +140,7 @@ app.py                              # Gradio UI
 similarity.py                       # 埋め込み抽出・スコア化・総合スコア（CALIBRATION / WEIGHTS）
 calibration/calibrate.py            # 実画像ペアで生値の分布を実測するスクリプト
 calibration/calibration_result.json # 実測結果（アンカー値・AUC・処理時間）
-samples/                            # サンプル画像（ココア / モカ、シロコ / フブキ、天下一品ロゴ / 進入禁止標識、プロシージャル生成の簡易キャラ・風景）
+samples/                            # サンプル画像（ココア / モカ、シロコ / フブキ、天下一品ロゴ / 進入禁止標識）
 requirements.txt
 ```
 
